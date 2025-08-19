@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "../../Uncertainty Quantification"
+		},
+		{
+			"path": "../../Large Language Model"
+		},
+		{
+			"path": "."
+		}
+	],
+	"settings": {}
+}
