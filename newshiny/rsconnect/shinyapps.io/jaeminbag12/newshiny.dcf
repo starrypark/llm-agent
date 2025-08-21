@@ -1,0 +1,12 @@
+name: newshiny
+title: newshiny
+username: jaeminbag12
+account: jaeminbag12
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 15232680
+bundleId: 10794594
+url: https://jaeminbag12.shinyapps.io/newshiny/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
