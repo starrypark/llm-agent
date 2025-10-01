@@ -176,3 +176,7 @@ tmp/**/*
 # ただし、.gitkeepファイルは保持
 !tmp/**/.gitkeep
 !**/tmp/**/.gitkeep
+
+# key
+
+api_key.txt

@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>생존 확률 챗봇</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <h2>📊 생존 확률 챗봇</h2>
+    <div id="chatbox"></div>
+    <div id="input-area">
+        <input type="text" id="userInput" placeholder="질문을 입력하세요..." size="50">
+        <button onclick="sendMessage()">보내기</button>
+        <button onclick="resetMemory()">Reset Memory</button> <!-- 🔹 추가 -->
+    </div>
+
+
+    <script>
+        async function sendMessage() {
+            const input = document.getElementById("userInput");
+            const chatbox = document.getElementById("chatbox");
+            const userText = input.value;
+            if (!userText) return;
+
+            // 사용자 메시지 표시
+            chatbox.innerHTML += `<div class="user">You: ${userText}</div>`;
+
+            // 서버 요청
+            const formData = new FormData();
+            formData.append("query", userText);
+
+            const res = await fetch("/chat", {
+                method: "POST",
+                body: formData
+            });
+
+            const data = await res.json();
+            chatbox.innerHTML += `<div class="bot">Bot: ${data.answer}</div>`;
+
+            input.value = "";
+            chatbox.scrollTop = chatbox.scrollHeight;
+        }
+
+    async function resetMemory() {
+        const formData = new FormData();
+        formData.append("session_id", "default");
+
+        const res = await fetch("/reset_memory", {
+            method: "POST",
+            body: formData
+        });
+
+        const data = await res.json();
+        const chatbox = document.getElementById("chatbox");
+        chatbox.innerHTML += `<div class="bot"><i>Memory cleared for session: ${data.session_id}</i></div>`;
+    }
+    </script>
+</body>
+</html>
