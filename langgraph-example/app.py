@@ -8,6 +8,12 @@ from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage, AIMessage
 from main import graph
 from langchain_openai import ChatOpenAI
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import JSONResponse
+import fitz  # PyMuPDF
+from langchain_openai import ChatOpenAI
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain.chains.summarize import load_summarize_chain
 
 # =============================
 # 1) Logger & API Key
@@ -69,13 +75,9 @@ async def chat(query: str = Form(...), session_id: str = Form("default")):
     LOGGER.info(f"[CHAT] session={session_id}, query={query}")
     history = get_session_memory(session_id)
 
-    if is_survival_question(query):
-        result = graph.invoke({"raw_query": query})
-        ai_answer = result["answer"]
-    else:
-        general_llm = ChatOpenAI(model="gpt-4.1", temperature=0.7)
-        messages = history + [HumanMessage(content=query)]
-        ai_answer = general_llm.invoke(messages).content
+    # 그냥 LangGraph에 태움 (내부 classify_question이 분기 처리)
+    result = graph.invoke({"raw_query": query, "query_type": None, "extracted": {}})
+    ai_answer = result["answer"]
 
     add_to_memory(session_id, query, ai_answer)
     return JSONResponse({"answer": ai_answer})
@@ -86,3 +88,30 @@ async def reset_memory(session_id: str = Form("default")):
         del SESSION_MEMORY[session_id]
         LOGGER.info(f"[MEMORY RESET] session={session_id}")
     return {"ok": True, "session_id": session_id, "message": "memory cleared"}
+
+pdf_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+@app.post("/upload-pdf")
+async def upload_pdf(file: UploadFile = File(...)):
+    # PDF 확인
+    if not file.filename.endswith(".pdf"):
+        return JSONResponse({"error": "PDF 파일만 업로드 가능합니다."}, status_code=400)
+
+    # PDF → 텍스트 변환
+    pdf_bytes = await file.read()
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    text = "\n".join([page.get_text() for page in doc])
+
+    if not text.strip():
+        return JSONResponse({"error": "PDF에서 텍스트를 추출하지 못했습니다."}, status_code=400)
+
+    # 긴 문서는 chunking
+    splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
+    docs = splitter.create_documents([text])
+
+    # LLM 요약 (map_reduce 체인 사용)
+    chain = load_summarize_chain(pdf_llm, chain_type="map_reduce")
+    summary = chain.run(docs)
+
+    return JSONResponse({"summary": summary})
+

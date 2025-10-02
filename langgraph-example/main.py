@@ -1,9 +1,12 @@
 import logging
 import os
 from dotenv import load_dotenv
-from typing import TypedDict, Dict, Optional, Annotated
+from typing import TypedDict, Dict, Optional, Annotated, Any
 from langgraph.graph import StateGraph, START, END
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_core.messages import HumanMessage
+import json
 
 # ======================
 # 로거 설정
@@ -26,10 +29,12 @@ if not OPENAI_API_KEY:
 class InputState(TypedDict):
     raw_query: str   # 사용자가 입력한 자연어 질문
     query_type: Optional[str]  # 질문 유형 (예: '생존분석', '일반질문' 등)
+    extracted: Dict[str, Any]  # 변수 추출 결과
 
 class ModelSelectState(TypedDict):
-    parsed_input: Dict   # 나이, 성별, stage, 기간 등 파싱된 구조화 데이터
-    model_id: str        # 선택된 모델 이름
+    raw_query: str   # 나이, 성별, stage, 기간 등 파싱된 구조화 데이터
+    model_id: str
+    extracted: Dict[str, Any]        # 선택된 모델 이름
 
 class CalcState(TypedDict):
     survival_prob: float
@@ -42,7 +47,7 @@ class OutputState(TypedDict):
 # 2. 노드 함수 정의
 # ======================
 
-classifier = ChatOpenAI(model="gpt-4.1-mini", temperature=0)
+classifier = ChatOpenAI(model="gpt-4.1", temperature=0)
 
 def classify_question(state: InputState) -> InputState:
     query = state["raw_query"]
@@ -64,39 +69,90 @@ def classify_question(state: InputState) -> InputState:
     LOGGER.info(f"[NODE] classify_question | raw_query={query}, query_type={ans}")
     return {**state, "query_type": ans}
 
+## Model에서 Variable 추출
+
+extraction_llm = ChatOpenAI(model="gpt-4.1", temperature=0)
+
+def variable_extraction(state: InputState) -> InputState:
+    """사용자 입력(raw_query)에서 age, sex, stage, year를 추출해 JSON 반환"""
+    query = state["raw_query"]
+    prompt = f"""
+    User question: "{query}"
+
+    Task: Extract survival fields from the text below.
+    Respond strictly in JSON format with keys: age, sex, stage, year.
+    
+    - age: integer
+    - sex: male=0, female=1
+    - stage: 1=Localized, 2=Regional, 3=Distant, 4=Unknown
+    - year: survival duration in years (not calendar year)
+    """
+
+    # LLM 호출
+    messages = [HumanMessage(content=prompt)]
+    response = extraction_llm.invoke(messages)
+
+    # JSON 파싱 (에러 시 기본값 반환)
+    try:
+        parsed = json.loads(response.content)
+    except Exception:
+        parsed = {"age": None, "sex": None, "stage": None, "year": None}
+
+    # state 업데이트
+    state["extracted"] = parsed
+
+    LOGGER.info(f"[NODE] variable_extraction | extracted_variablees={parsed}")
+
+    return state
+
 ## Retreiver 먼저 정의
 
-# MODEL_DOCS = [
-#     {"name": "model_1", "desc": "Uses only sex variable"},
-#     {"name": "model_2", "desc": "Uses only age variable"},
-#     {"name": "model_3", "desc": "Uses only seer stage variable"},
-#     {"name": "model_4", "desc": "Uses sex and age variables"},
-#     {"name": "model_5", "desc": "Uses sex and seer stage variables"},
-#     {"name": "model_6", "desc": "Uses age and seer stage variables"},
-#     {"name": "model_7", "desc": "Uses sex, age, and seer stage variables"},
-# ]
-# texts = [f"{d['name']}: {d['desc']}" for d in MODEL_DOCS]
+MODEL_DOCS = [
+    {"name": "model_1", "desc": "Uses only sex variable"},
+    {"name": "model_2", "desc": "Uses only age variable"},
+    {"name": "model_3", "desc": "Uses only seer stage variable"},
+    {"name": "model_4", "desc": "Uses sex and age variables"},
+    {"name": "model_5", "desc": "Uses sex and seer stage variables"},
+    {"name": "model_6", "desc": "Uses age and seer stage variables"},
+    {"name": "model_7", "desc": "Uses sex, age, and seer stage variables"},
+]
+texts = [f"{d['name']}: {d['desc']}" for d in MODEL_DOCS]
 
-# embeddings = OpenAIEmbeddings()
-# model_db = FAISS.from_texts(texts, embeddings)
-# model_retriever = model_db.as_retriever()
+embeddings = OpenAIEmbeddings()
+model_db = FAISS.from_texts(texts, embeddings)
+model_retriever = model_db.as_retriever()
 
+def select_model(state: InputState) -> ModelSelectState:
+    extracted = state.get("extracted", {})
 
-def parse_input(state: InputState) -> ModelSelectState:
-    query = state["raw_query"]
-    parsed = {"age": 60, "sex": "F", "stage": 2, "horizon": 5}
-    LOGGER.info(f"[NODE] parse_input | query={query} -> parsed={parsed}")
-    return {"parsed_input": parsed, "model_id": ""}
+    # None이 아닌 변수만 리스트업
+    present_vars = [k for k, v in extracted.items() if v is not None]
 
-def select_model(state: ModelSelectState) -> ModelSelectState:
-    parsed = state["parsed_input"]
-    model_id = "model_7" if parsed["stage"] == 2 else "default_model"
-    LOGGER.info(f"[NODE] select_model | stage={parsed['stage']} -> model_id={model_id}")
-    return {"parsed_input": parsed, "model_id": model_id}
+    enriched_query = f"""
+    Variables detected: {', '.join(present_vars) if present_vars else 'None'}
+
+    Task: Based on these variables, select the best matching model 
+    among [model_1 ... model_7]. 
+    Output ONLY the model name (e.g. "model_4").
+    """
+
+    results = model_retriever.invoke(enriched_query)
+    model_id = results[0].page_content.split(":")[0].strip() if results else "No matching model"
+
+    LOGGER.info(f"[NODE] select_model | extracted={extracted}, result={model_id}")
+    state["model_id"] = model_id
+    return state
+
+# def parse_input(state: ModelSelectState) -> ModelSelectState:
+#     query = state["raw_query"]
+#     parsed = {"age": 60, "sex": "F", "stage": 2, "horizon": 5}
+#     LOGGER.info(f"[NODE] parse_input | query={query} -> parsed={parsed}")
+#     return {"parsed_input": parsed, "model_id": ""}
+
 
 def run_calculation(state: ModelSelectState) -> CalcState:
     model_id = state["model_id"]
-    parsed = state["parsed_input"]
+    parsed = state["extracted"]
     prob = 0.6628 if model_id == "model_7" else 0.5
     LOGGER.info(f"[NODE] run_calculation | model_id={model_id}, parsed={parsed}, prob={prob}")
     return {"survival_prob": prob}
@@ -123,7 +179,7 @@ builder = StateGraph(OutputState, input_schema=InputState, output_schema=OutputS
 
 # 노드 추가
 builder.add_node("classify_question", classify_question)
-builder.add_node("parse_input", parse_input)
+builder.add_node("variable_extraction", variable_extraction)
 builder.add_node("select_model", select_model)
 builder.add_node("run_calculation", run_calculation)
 builder.add_node("format_output", format_output)
@@ -137,13 +193,13 @@ builder.add_conditional_edges(
     "classify_question",
     lambda state: state["query_type"],  # query_type 값으로 분기
     {
-        "survival": "parse_input",   # 생존분석 → parse_input으로
+        "survival": "variable_extraction",   # 생존분석 → parse_input으로
         "chat": "general_chat",      # 일반 대화 → general_chat으로
     },
 )
 
 # survival pipeline
-builder.add_edge("parse_input", "select_model")
+builder.add_edge("variable_extraction","select_model")
 builder.add_edge("select_model", "run_calculation")
 builder.add_edge("run_calculation", "format_output")
 builder.add_edge("format_output", END)
