@@ -122,25 +122,35 @@ embeddings = OpenAIEmbeddings()
 model_db = FAISS.from_texts(texts, embeddings)
 model_retriever = model_db.as_retriever()
 
+model_select_llm = ChatOpenAI(model="gpt-4.1", temperature=0)
+
 def select_model(state: InputState) -> ModelSelectState:
     extracted = state.get("extracted", {})
-
-    # None이 아닌 변수만 리스트업
     present_vars = [k for k, v in extracted.items() if v is not None]
 
-    enriched_query = f"""
-    Variables detected: {', '.join(present_vars) if present_vars else 'None'}
+    # Retriever로 후보군 검색
+    enriched_query = f"Variables detected: {', '.join(present_vars)}"
+    candidates = model_retriever.invoke(enriched_query)
+    top_k = 5  # or 3
+    candidates = candidates[:top_k]
+    candidate_texts = "\n".join([doc.page_content for doc in candidates])
 
-    Task: Based on these variables, select the best matching model 
-    among [model_1 ... model_7]. 
+    # LLM이 후보 중 최적 모델 선택
+    prompt = f"""
+    Below are available survival models and their descriptions:
+
+    {candidate_texts}
+
+    The user's variables are: {', '.join(present_vars)}
+
+    Task: Select the best-fitting model among the candidates above.
     Output ONLY the model name (e.g. "model_4").
     """
 
-    results = model_retriever.invoke(enriched_query)
-    model_id = results[0].page_content.split(":")[0].strip() if results else "No matching model"
+    response = model_select_llm.invoke(prompt).content.strip()
 
-    LOGGER.info(f"[NODE] select_model | extracted={extracted}, result={model_id}")
-    state["model_id"] = model_id
+    LOGGER.info(f"[NODE] select_model | extracted={extracted}, result={response}")
+    state["model_id"] = response
     return state
 
 # def parse_input(state: ModelSelectState) -> ModelSelectState:
@@ -151,6 +161,7 @@ def select_model(state: InputState) -> ModelSelectState:
 
 
 def run_calculation(state: ModelSelectState) -> CalcState:
+    """내부 모델을 통한 생존확률 계산 함수 (model_7)."""
     model_id = state["model_id"]
     parsed = state["extracted"]
     prob = 0.6628 if model_id == "model_7" else 0.5
@@ -174,7 +185,7 @@ def general_chat(state: InputState) -> OutputState:
 
 # ======================
 # 3. 그래프 구성
-# ======================
+# ======================d
 builder = StateGraph(OutputState, input_schema=InputState, output_schema=OutputState)
 
 # 노드 추가

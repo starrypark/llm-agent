@@ -13,7 +13,6 @@ from fastapi.responses import JSONResponse
 import fitz  # PyMuPDF
 from langchain_openai import ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain.chains.summarize import load_summarize_chain
 
 # =============================
 # 1) Logger & API Key
@@ -93,25 +92,41 @@ pdf_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
 @app.post("/upload-pdf")
 async def upload_pdf(file: UploadFile = File(...)):
-    # PDF 확인
     if not file.filename.endswith(".pdf"):
         return JSONResponse({"error": "PDF 파일만 업로드 가능합니다."}, status_code=400)
 
-    # PDF → 텍스트 변환
+    # 1️⃣ PDF → 텍스트
     pdf_bytes = await file.read()
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     text = "\n".join([page.get_text() for page in doc])
-
     if not text.strip():
         return JSONResponse({"error": "PDF에서 텍스트를 추출하지 못했습니다."}, status_code=400)
 
-    # 긴 문서는 chunking
+    # 2️⃣ 긴 문서 나누기
     splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
-    docs = splitter.create_documents([text])
+    chunks = splitter.create_documents([text])
 
-    # LLM 요약 (map_reduce 체인 사용)
-    chain = load_summarize_chain(pdf_llm, chain_type="map_reduce")
-    summary = chain.run(docs)
+    # 3️⃣ 부분 요약 프롬프트 (map 단계)
+    map_prompt = ChatPromptTemplate.from_template(
+        "다음 텍스트를 5문장 이내로 핵심만 요약해줘:\n\n{text}"
+    )
 
-    return JSONResponse({"summary": summary})
+    # 4️⃣ 전체 통합 요약 프롬프트 (reduce 단계)
+    reduce_prompt = ChatPromptTemplate.from_template(
+        "다음은 여러 부분 요약이야. 이를 기반으로 전체 내용을 한 문단으로 요약해줘:\n\n{summaries}"
+    )
+
+    # 5️⃣ 각 chunk별 요약 (map)
+    partial_summaries = []
+    for chunk in chunks:
+        map_input = map_prompt.format_messages(text=chunk.page_content)
+        summary_part = pdf_llm.invoke(map_input).content.strip()
+        partial_summaries.append(summary_part)
+
+    # 6️⃣ 전체 통합 (reduce)
+    summaries_joined = "\n".join(partial_summaries)
+    reduce_input = reduce_prompt.format_messages(summaries=summaries_joined)
+    final_summary = pdf_llm.invoke(reduce_input).content.strip()
+
+    return JSONResponse({"summary": final_summary})
 
