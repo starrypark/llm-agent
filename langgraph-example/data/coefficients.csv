@@ -1,0 +1,39 @@
+type,name,value
+base,age,0.039641714
+base,sex_female,-0.071272243
+seer,1,0
+seer,2,1.70730988
+seer,3,3.544653898
+seer,4,2.071471649
+condition,Myocardial infarction,-0.014547321
+condition,Congestive heart failure,0.027183858
+condition,Peripheral vascular disease,-0.027791418
+condition,Cerebrovascular disease,0.148833734
+condition,Dementia,0.467655421
+condition,Chronic pumonary disease,-0.032543138
+condition,Connective tissue disease,-0.043772648
+condition,Peptic ulcer disease,-0.102071696
+condition,Mild liver disease,-0.113896765
+condition,Diabetes,-0.006046982
+condition,Hemiplegia,0.538985118
+condition,renal disease,0.346950671
+condition,Moderate to severe liver disease,0.241099872
+interaction,CCI_1:CCI_8,0.104586622
+interaction,CCI_6:CCI_2,0.097231701
+interaction,CCI_10:CCI_3,0.053838313
+interaction,CCI_10:CCI_4,0.083108926
+interaction,CCI_8:CCI_4,-0.128999196
+interaction,CCI_6:CCI_4,0.076195651
+interaction,CCI_8:CCI_5,-0.229042082
+interaction,CCI_8:CCI_6,0.115695886
+interaction,CCI_8:CCI_7,0.168546576
+interaction,CCI_10:CCI_8,0.092213669
+interaction,CCI_8:CCI_9,0.049049734
+interaction,CCI_6:CCI_9,0.08751032
+interaction,CCI_10:CCI_11,-0.147408683
+interaction,CCI_8:CCI_11,0.180144318
+interaction,CCI_6:CCI_11,-0.138098556
+smoking,1,0
+smoking,2,2
+smoking,3,4
+smoking,4,2.5

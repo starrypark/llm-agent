@@ -6,7 +6,10 @@ from langgraph.graph import StateGraph, START, END
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.messages import HumanMessage
-import json
+import math, ast, re, json, datetime
+import pandas as pd
+from bs4 import BeautifulSoup
+import requests
 
 # ======================
 # 로거 설정
@@ -23,6 +26,17 @@ if not OPENAI_API_KEY and os.path.exists("api_key.txt"):
 if not OPENAI_API_KEY:
     raise RuntimeError("❌ OPENAI_API_KEY가 설정되어 있지 않습니다. .env 또는 api_key.txt를 확인하세요.")
 
+# =============================
+# 2) 데이터 로드 (계산용 CSV)
+# =============================
+BASEHAZ_PATH = "data/Anujin_240828_ACS_baseline.csv"
+COEFS_PATH   = "data/coefficients.csv"
+try:
+    basehazard_acs = pd.read_csv(BASEHAZ_PATH)
+    coefs_acs      = pd.read_csv(COEFS_PATH)
+except Exception as e:
+    raise RuntimeError(f"데이터 로드 실패: {e}")
+
 # ======================
 # 1. 상태 정의 (TypedDict)
 # ======================
@@ -38,6 +52,7 @@ class ModelSelectState(TypedDict):
 
 class CalcState(TypedDict):
     survival_prob: float
+    extracted: Dict[str, Any]
 
 class OutputState(TypedDict):
     answer: str      # 최종 사용자 응답 메시지
@@ -163,14 +178,97 @@ def select_model(state: InputState) -> ModelSelectState:
 def run_calculation(state: ModelSelectState) -> CalcState:
     """내부 모델을 통한 생존확률 계산 함수 (model_7)."""
     model_id = state["model_id"]
+
+    if model_id != "model_7":
+        LOGGER.warning(f"[NODE] run_calculation | model_id={model_id} not supported.")
+        return {"survival_prob": None}
+    
     parsed = state["extracted"]
-    prob = 0.6628 if model_id == "model_7" else 0.5
+    age = parsed['age']
+    sex = parsed['sex']
+    stage = parsed['stage']
+    year = parsed['year']
+    age_coef    = float(coefs_acs.loc[coefs_acs['name'] == 'age', 'value'].values[0])
+    female_coef = float(coefs_acs.loc[coefs_acs['name'] == 'sex_female', 'value'].values[0])
+
+    seer_coef_df = coefs_acs[coefs_acs['type'] == 'seer']
+    seer_map = {int(n): float(v) for n, v in zip(seer_coef_df["name"], seer_coef_df["value"]) if str(n).isdigit()}
+
+    lr = age_coef * age + female_coef * sex + seer_map.get(stage, 0.0)
+
+    nyear = int(year) * 365
+    row = basehazard_acs.loc[basehazard_acs['time'] == nyear, 'hazard']
+    if row.empty:
+        nearest_idx = (basehazard_acs['time'] - nyear).abs().idxmin()
+        basehazard = float(basehazard_acs.loc[nearest_idx, 'hazard'])
+    else:
+        basehazard = float(row.values[0])
+    prob = math.exp(-1.0 * basehazard * math.exp(lr))
     LOGGER.info(f"[NODE] run_calculation | model_id={model_id}, parsed={parsed}, prob={prob}")
     return {"survival_prob": prob}
 
+## 국가암통계 
+
+
+def fetch_kcca_stat_text() -> str:
+    """국가암정보센터 페이지에서 주요 문단을 가져오는 간단한 RAG 참조용 함수."""
+    try:
+        url = "https://www.cancer.go.kr/lay1/S1T648C650/contents.do"
+        resp = requests.get(url, timeout=5)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        paras = soup.select("div.cont_txt p")
+        texts = [p.get_text().strip() for p in paras if p.get_text().strip()]
+
+        return " ".join(texts[:3]) if texts else "국가암정보센터 페이지에서 통계 정보를 불러오지 못했습니다."
+    except Exception as e:
+        return f"통계 정보 로드 중 오류 발생: {e}"
+
 def format_output(state: CalcState) -> OutputState:
-    prob = state["survival_prob"]
-    answer = f"5년 생존 확률은 약 {prob*100:.1f}% 입니다."
+    prob = state.get("survival_prob")
+    extracted = state.get("extracted", {})
+
+    if prob is None:
+        return {"answer": "현재 입력된 변수 조합에 맞는 생존확률 계산 모델이 없습니다."}
+
+    # -------------------------
+    # ① 내부 모델 계산 결과 메시지
+    # -------------------------
+    base_msg = f"저희 내부 모델에 의한 5년 생존 확률은 약 {prob * 100:.1f}% 입니다."
+
+    # -------------------------
+    # ② RAG 검색 준비
+    # -------------------------
+    sex_value = extracted.get("sex")
+    sex_label = "여성" if sex_value == 1 else "남성" if sex_value == 0 else "전체"
+
+    # 쿼리 생성 (retriever-friendly 키워드 기반)
+    query = f"{sex_label} 위암 5년 생존율 2018 2019 2020 2021 2022"
+
+    # -------------------------
+    # ③ 벡터 DB 로드 및 검색
+    # -------------------------
+    db = FAISS.load_local("kcca_stats_db", OpenAIEmbeddings(), allow_dangerous_deserialization=True)
+    retriever = db.as_retriever(search_kwargs={"k": 3})
+    results = retriever.invoke(query)
+
+    if not results:
+        stat_context = "국가암정보센터 DB에서 관련 통계를 찾지 못했습니다."
+    else:
+        stat_context = "\n".join([doc.page_content for doc in results])
+
+    # -------------------------
+    # ④ 최종 메시지 통합
+    # -------------------------
+    answer = (
+        f"{base_msg}\n\n"
+        f"📊 [국가암정보센터 참고]\n"
+        f"{sex_label}의 위암(2018–2022년) 5년 생존률 관련 요약:\n"
+        f"{stat_context}\n\n"
+        "※ 위 통계는 전체 위암 환자 집단의 평균값이며, 실제 개인의 임상 상황에 따라 차이가 있을 수 있습니다."
+    )
+
     LOGGER.info(f"[NODE] format_output | answer={answer}")
     return {"answer": answer}
 

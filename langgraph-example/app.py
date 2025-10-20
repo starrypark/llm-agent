@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 import fitz  # PyMuPDF
 from langchain_openai import ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+import pandas as pd
 
 # =============================
 # 1) Logger & API Key
@@ -28,6 +29,17 @@ if not OPENAI_API_KEY and os.path.exists("api_key.txt"):
     os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 if not OPENAI_API_KEY:
     raise RuntimeError("❌ OPENAI_API_KEY가 설정되어 있지 않습니다. .env 또는 api_key.txt를 확인하세요.")
+
+# =============================
+# 2) 데이터 로드 (계산용 CSV)
+# =============================
+BASEHAZ_PATH = "data/Anujin_240828_ACS_baseline.csv"
+COEFS_PATH   = "data/coefficients.csv"
+try:
+    basehazard_acs = pd.read_csv(BASEHAZ_PATH)
+    coefs_acs      = pd.read_csv(COEFS_PATH)
+except Exception as e:
+    raise RuntimeError(f"데이터 로드 실패: {e}")
 
 # =============================
 # 2) 세션별 memory
