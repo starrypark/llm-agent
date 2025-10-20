@@ -10,6 +10,7 @@ import math, ast, re, json, datetime
 import pandas as pd
 from bs4 import BeautifulSoup
 import requests
+from rag.rag_cancer_stats import get_cancer_survival_rate
 
 # ======================
 # 로거 설정
@@ -207,6 +208,76 @@ def run_calculation(state: ModelSelectState) -> CalcState:
     LOGGER.info(f"[NODE] run_calculation | model_id={model_id}, parsed={parsed}, prob={prob}")
     return {"survival_prob": prob}
 
+    
+def format_output(state: CalcState) -> OutputState:
+    prob = state.get("survival_prob")
+    extracted = state.get("extracted", {})
+
+    if prob is None:
+        return {"answer": "현재 입력된 변수 조합에 맞는 생존확률 계산 모델이 없습니다."}
+
+    # ① 내부 모델 계산 결과
+    base_msg = f"저희 내부 모델에 의한 5년 생존 확률은 약 {prob * 100:.1f}% 입니다."
+
+    # ② RAG 검색
+    sex_value = extracted.get("sex")
+    sex_label = "여성" if sex_value == 1 else "남성" if sex_value == 0 else "전체"
+    cancer_type = "위암"  # 현재는 예시, 나중에 extracted에서 가져올 수 있음
+    year_range = "2018–2022"
+
+    rag_result = get_cancer_survival_rate(cancer_type, sex_label, year_range)
+
+    # ③ 최종 출력
+    answer = (
+        f"{base_msg}\n\n"
+        f"📊 [국가암정보센터 참고]\n"
+        f"{rag_result}\n\n"
+        "※ 위 통계는 전체 위암 환자 집단의 평균값이며, "
+        "실제 개인의 임상 상황에 따라 차이가 있을 수 있습니다."
+    )
+
+    LOGGER.info(f"[NODE] format_output | answer={answer}")
+    return {"answer": answer}
+
+# def parse_input(state: ModelSelectState) -> ModelSelectState:
+#     query = state["raw_query"]
+#     parsed = {"age": 60, "sex": "F", "stage": 2, "horizon": 5}
+#     LOGGER.info(f"[NODE] parse_input | query={query} -> parsed={parsed}")
+#     return {"parsed_input": parsed, "model_id": ""}
+
+
+def run_calculation(state: ModelSelectState) -> CalcState:
+    """내부 모델을 통한 생존확률 계산 함수 (model_7)."""
+    model_id = state["model_id"]
+
+    if model_id != "model_7":
+        LOGGER.warning(f"[NODE] run_calculation | model_id={model_id} not supported.")
+        return {"survival_prob": None}
+    
+    parsed = state["extracted"]
+    age = parsed['age']
+    sex = parsed['sex']
+    stage = parsed['stage']
+    year = parsed['year']
+    age_coef    = float(coefs_acs.loc[coefs_acs['name'] == 'age', 'value'].values[0])
+    female_coef = float(coefs_acs.loc[coefs_acs['name'] == 'sex_female', 'value'].values[0])
+
+    seer_coef_df = coefs_acs[coefs_acs['type'] == 'seer']
+    seer_map = {int(n): float(v) for n, v in zip(seer_coef_df["name"], seer_coef_df["value"]) if str(n).isdigit()}
+
+    lr = age_coef * age + female_coef * sex + seer_map.get(stage, 0.0)
+
+    nyear = int(year) * 365
+    row = basehazard_acs.loc[basehazard_acs['time'] == nyear, 'hazard']
+    if row.empty:
+        nearest_idx = (basehazard_acs['time'] - nyear).abs().idxmin()
+        basehazard = float(basehazard_acs.loc[nearest_idx, 'hazard'])
+    else:
+        basehazard = float(row.values[0])
+    prob = math.exp(-1.0 * basehazard * math.exp(lr))
+    LOGGER.info(f"[NODE] run_calculation | model_id={model_id}, parsed={parsed}, prob={prob}")
+    return {"survival_prob": prob}
+
 ## 국가암통계 
 
 
@@ -225,6 +296,7 @@ def fetch_kcca_stat_text() -> str:
     except Exception as e:
         return f"통계 정보 로드 중 오류 발생: {e}"
 
+
 def format_output(state: CalcState) -> OutputState:
     prob = state.get("survival_prob")
     extracted = state.get("extracted", {})
@@ -233,39 +305,33 @@ def format_output(state: CalcState) -> OutputState:
         return {"answer": "현재 입력된 변수 조합에 맞는 생존확률 계산 모델이 없습니다."}
 
     # -------------------------
-    # ① 내부 모델 계산 결과 메시지
+    # 내부 모델 결과 메시지
     # -------------------------
     base_msg = f"저희 내부 모델에 의한 5년 생존 확률은 약 {prob * 100:.1f}% 입니다."
 
     # -------------------------
-    # ② RAG 검색 준비
+    # RAG 검색 실행
     # -------------------------
     sex_value = extracted.get("sex")
-    sex_label = "여성" if sex_value == 1 else "남성" if sex_value == 0 else "전체"
+    sex_label = "여성" if sex_value == 1 else "남성"
+    seer_stage = extracted.get("stage")
 
-    # 쿼리 생성 (retriever-friendly 키워드 기반)
-    query = f"{sex_label} 위암 5년 생존율 2018 2019 2020 2021 2022"
+    # 현재는 위암 고정 (원하면 cancer_type = extracted.get("cancer_type", "위암")로 일반화 가능)
+    cancer_type = "위암"
+    year_range = "2018–2022"
 
-    # -------------------------
-    # ③ 벡터 DB 로드 및 검색
-    # -------------------------
-    db = FAISS.load_local("kcca_stats_db", OpenAIEmbeddings(), allow_dangerous_deserialization=True)
-    retriever = db.as_retriever(search_kwargs={"k": 3})
-    results = retriever.invoke(query)
-
-    if not results:
-        stat_context = "국가암정보센터 DB에서 관련 통계를 찾지 못했습니다."
-    else:
-        stat_context = "\n".join([doc.page_content for doc in results])
+    try:
+        stat_summary = get_cancer_survival_rate(cancer_type, sex_label, year_range, seer_stage)
+    except Exception as e:
+        stat_summary = f"국가암등록통계 검색 중 오류가 발생했습니다: {e}"
 
     # -------------------------
-    # ④ 최종 메시지 통합
+    # 결과 통합
     # -------------------------
     answer = (
         f"{base_msg}\n\n"
-        f"📊 [국가암정보센터 참고]\n"
-        f"{sex_label}의 위암(2018–2022년) 5년 생존률 관련 요약:\n"
-        f"{stat_context}\n\n"
+        f"[국가암등록통계 참고]\n"
+        f"{stat_summary.strip()}\n\n"
         "※ 위 통계는 전체 위암 환자 집단의 평균값이며, 실제 개인의 임상 상황에 따라 차이가 있을 수 있습니다."
     )
 
