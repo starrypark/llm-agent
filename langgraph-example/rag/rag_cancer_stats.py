@@ -19,7 +19,7 @@ if not OPENAI_API_KEY and os.path.exists("api_key.txt"):
     os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
 
 if not OPENAI_API_KEY:
-    raise RuntimeError("❌ OPENAI_API_KEY가 설정되어 있지 않습니다. .env 또는 api_key.txt를 확인하세요.")
+    raise RuntimeError("OPENAI_API_KEY가 설정되어 있지 않습니다. .env 또는 api_key.txt를 확인하세요.")
 
 
 # DB 경로 설정
@@ -75,7 +75,7 @@ def get_cancer_survival_rate(
     국가암정보센터 RAG 기반 생존율 검색 (병기 포함)
     예시:
         get_cancer_survival_rate("위암", "남성", "2018–2022", 3)
-        get_cancer_survival_rate("폐암", "여성", "2018–2022")
+        get_cancer_survival_rate("위암", "여성", "2018–2022", 1)
     """
 
     # -------------------------
